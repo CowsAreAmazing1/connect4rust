@@ -1,4 +1,5 @@
 
+use serde::{Serialize, Deserialize};
 
 use std::{
     rc::Rc,
@@ -7,10 +8,10 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-const BOARD_SIZE: (usize, usize) = (4, 4);
+pub const BOARD_SIZE: (usize, usize) = (7, 6);
 
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Player {
     Red,
     Yellow,
@@ -19,7 +20,7 @@ pub enum Player {
 
 impl Player {
     fn flip(&self) -> Self {
-        return match self {
+        match self {
             Player::Red => Player::Yellow,
             Player::Yellow => Player::Red,
             _ => panic!("Turn is invalid. Turn: {:?}", self),
@@ -43,16 +44,49 @@ impl Display for Player {
 
 type Board = Vec<Vec<Player>>;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BoardKey(pub Board);
+
+impl BoardKey {
+    // Returns the canonical (lexicographically smallest) of the board and its mirror
+    pub fn canonical(&self) -> Board {
+        let orig = &self.0;
+        let mirror: Board = orig.iter().rev().cloned().collect();
+        if orig < &mirror { orig.clone() } else { mirror }
+    }
+}
+
+impl PartialEq for BoardKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical() == other.canonical()
+    }
+}
+
+impl Eq for BoardKey {}
 
 impl Hash for BoardKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        for col in &self.0 {
+        for col in &self.canonical() {
             for cell in col {
                 cell.hash(state);
             }
         }
+    }
+}
+
+impl Display for BoardKey {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        let board = self.canonical();
+        for y in (0..BOARD_SIZE.1).rev() {
+            for x in 0..BOARD_SIZE.0 {
+                write!(f, "{}", board[x][y])?;
+            }
+            writeln!(f)?;
+        }
+        for _ in 0..BOARD_SIZE.0 {
+            write!(f, "  ︥")?;
+        }
+        Ok(())
     }
 }
 
@@ -64,7 +98,7 @@ pub fn empty_board() -> Board {
     board
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 enum Result {
     Win(Player),
     Draw,
@@ -117,16 +151,16 @@ impl Result {
         }
         // Check for draw (no empty spaces)
         if board.iter().all(|col| col.iter().all(|&cell| cell != Player::Empty)) {
-            return Result::Draw
+            Result::Draw
         } else {
-            return Result::Ongoing
+            Result::Ongoing
         }
     }
 }
 
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameNode {
     pub board: Vec<Vec<Player>>,
     turn: Player,
@@ -188,7 +222,7 @@ impl Display for GameNode {
             for x in 0..BOARD_SIZE.0 {
                 write!(f, "{}", self.board[x][y])?;
             }
-            write!(f, "\n")?;
+            writeln!(f)?;
         }
         write!(f, "Goes to {}, ", self.children.len())?;
         match self.result {
@@ -216,9 +250,6 @@ fn play_game(game: &mut GameNode) {
 }
 
 
-
-
-
 pub fn find_children(
     node: &mut GameNode,
     depth: u32,
@@ -232,36 +263,22 @@ pub fn find_children(
 
     for x in 0..BOARD_SIZE.0 {
         // Try playing in column x
-        let new_board_op = GameNode::board_from_turn(&node, x);
-        
-        // If play is valid ...
+        let new_board_op = node.board_from_turn(x);
         if let Some(new_board) = new_board_op {
             // Get the key to this state in the table
             let key = BoardKey(new_board.clone());
-
-            // If this state has already been searched ...
-            let child_rc_op = if let Some(existing) = table.get(&key) {
-                // Get the existing state from the table
-                Some(Rc::clone(existing))
-            } else {
-                // Otherwise create the new game state node
-                let mut new_node = GameNode::from_board(new_board, node.turn.flip());
-                // Recurse into this node
-                let searched_node_op = find_children(&mut new_node, depth-1, table);
-                // If this recursion results in a new state ...
-                if let Some(searched_node) = searched_node_op {
-                    // Add the new state to the table
-                    table.insert(key.clone(), searched_node);
-                    Some(table.get(&key).unwrap().to_owned())
-                } else {
-                    // Ignore and stop the recursion from this node
-                    None
-                }
-            };
-
-            // If the child for column x is valid ...
-            if let Some(child_rc) = child_rc_op {
-                node.children.push(child_rc);
+            let canonical_key = BoardKey(key.canonical());
+            if let Some(existing) = table.get(&canonical_key) {
+                // Already seen, just add reference
+                node.children.push(Rc::clone(existing));
+                continue;
+            }
+            // Otherwise create the new game state node
+            let mut new_node = GameNode::from_board(new_board, node.turn.flip());
+            let searched_node_op = find_children(&mut new_node, depth-1, table);
+            if let Some(searched_node) = searched_node_op {
+                table.insert(canonical_key, searched_node.clone());
+                node.children.push(searched_node);
             }
         }
     }
@@ -286,8 +303,6 @@ fn display_full_tree(start_node: &GameNode) {
 
 
 /*
-
-
 fn main() {
     let eb = empty_board();
     let mut game = GameNode::from_board(eb, Player::Red);
@@ -296,10 +311,15 @@ fn main() {
     table.insert(BoardKey(game.board.clone()), Rc::new(game.clone()));
     
     // Update the game passed in
-    find_children(&mut game, 3, &mut table).unwrap();
+    let now = std::time::Instant::now();
+    find_children(&mut game, 9, &mut table);
+    println!("Tree gen took {:?}", now.elapsed());
 
     println!("Total unique nodes: {}", table.len());
     println!("Total children: {}", game.count_children());
+
+    let file = std::fs::File::create("tree.json");
+
 
     // display_full_tree(&game);
 
@@ -317,6 +337,4 @@ fn main() {
     // println!("Random table entry:\n{}", table.values().next().unwrap());
 
 }
-
-
 */
