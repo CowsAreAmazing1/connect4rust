@@ -1,209 +1,103 @@
-use std::fmt::{Display, Formatter};
+mod tree;
 
-mod tree_display;
+use egui::Color32;
+use egui_graphs::{DefaultNodeShape, Node, SettingsStyle};
+use tree::{GameNode, Player, empty_board, find_children};
+use std::collections::HashMap;
+use eframe::{egui::Pos2, run_native, App, NativeOptions};
+use petgraph::prelude::*;
 
-const BOARD_SIZE: (usize, usize) = (7, 6);
+use crate::tree::BoardKey;
 
-
-#[derive(Debug, Copy, Clone, PartialEq)]
-enum Player {
-    Red,
-    Yellow,
-    Empty,
-}
-
-type Board = Vec<Vec<Player>>;
-
-fn empty_board() -> Board {
-    let mut board = Vec::new();
-    for _x in 0..BOARD_SIZE.0 {
-        board.push(vec![Player::Empty; BOARD_SIZE.1]);
-    }
-    board
-}
-
-#[derive(Debug, Copy, Clone, PartialEq)]
-enum Result {
-    Win(Player),
-    Draw,
-    Ongoing,
-}
-
-impl Result {
-    fn from_board(board: &Board) -> Self {
-        // Check horizontal, vertical, and both diagonals for 4 in a row
-        for x in 0..BOARD_SIZE.0 {
-            for y in 0..BOARD_SIZE.1 {
-                let player = board[x][y];
-                if player == Player::Empty {
-                    continue;
-                }
-                // Horizontal
-                if x + 3 < BOARD_SIZE.0
-                    && board[x + 1][y] == player
-                    && board[x + 2][y] == player
-                    && board[x + 3][y] == player
-                {
-                    return Result::Win(player);
-                }
-                // Vertical
-                if y + 3 < BOARD_SIZE.1
-                    && board[x][y + 1] == player
-                    && board[x][y + 2] == player
-                    && board[x][y + 3] == player
-                {
-                    return Result::Win(player);
-                }
-                // Diagonal /
-                if x + 3 < BOARD_SIZE.0 && y + 3 < BOARD_SIZE.1
-                    && board[x + 1][y + 1] == player
-                    && board[x + 2][y + 2] == player
-                    && board[x + 3][y + 3] == player
-                {
-                    return Result::Win(player);
-                }
-                // Diagonal \
-                if x >= 3
-                    && y + 3 < BOARD_SIZE.1
-                    && board[x - 1][y + 1] == player
-                    && board[x - 2][y + 2] == player
-                    && board[x - 3][y + 3] == player
-                {
-                    return Result::Win(player);
-                }
-            }
-        }
-        // Check for draw (no empty spaces)
-        if board.iter().all(|col| col.iter().all(|&cell| cell != Player::Empty)) {
-            return Result::Draw
-        } else {
-            return Result::Ongoing
-        }
-    }
+fn main() -> eframe::Result {
+    run_native(
+        "grahpher", 
+        NativeOptions::default(), 
+        Box::new(|cc| Ok(Box::new(BasicApp::new(cc)))),
+    )
 }
 
 
 
-#[derive(Debug, Clone)]
-struct GameNode {
-    board: Vec<Vec<Player>>,
-    turn: Player,
-    result: Result,
-    children: Vec<GameNode>,
+pub struct BasicApp {
+    g: egui_graphs::Graph,
 }
 
-impl GameNode {
-    fn from_board(board: Board) -> Self {
-        let result = Result::from_board(&board);
-
-        GameNode {
-            board,
-            turn: Player::Red,
-            result,
-            children: Vec::new(),
-        }
-    }
-
-    fn play_col(&mut self, col: usize) {
-        for y in 0..BOARD_SIZE.1 {
-            if self.board[col][y] == Player::Empty {
-                self.board[col][y] = self.turn;
-                self.result = Result::from_board(&self.board);
-                return
-            }
-        }
-        panic!("Column {} is full", col);
-    }
-
-    fn from_turn(&mut self, col: usize) -> Self {
-        let new_board = self.board.clone();
-        let mut new_node = GameNode::from_board(new_board);
-        new_node.play_col(col);
-        new_node.flip_turn();
-
-        self.children.push(new_node.clone());
-
-        return new_node;
-    }
-
-    fn flip_turn(&mut self) {
-        self.turn = match self.turn {
-            Player::Red => Player::Yellow,
-            Player::Yellow => Player::Red,
-            _ => panic!("This board's turn is Empty\n{}", self),
-        }
-    }
-
-    fn count_children(&self) -> usize {
-        self.children.iter().map(|child| child.count_children()).sum::<usize>() + self.children.len()
-    }
-}
-
-impl Display for GameNode {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        for y in (0..BOARD_SIZE.1).rev() {
-            for x in 0..BOARD_SIZE.0 {
-                match self.board[x][y] {
-                    Player::Red    => write!(f, "🔴")?,
-                    Player::Yellow => write!(f, "🟡")?,
-                    Player::Empty  => write!(f, "  ")?,
-                };
-            }
-            write!(f, "\n")?;
-        }
-        write!(f, "Goes to {}", self.children.len())
-    }
-}
-
-
-
-#[allow(dead_code)]
-fn play_game(game: &mut GameNode) {
-    while game.result == Result::Ongoing {
-        println!("{}", game);
-        let mut input = String::new();
-        println!("Enter column to play (0-{}): ", BOARD_SIZE.0 - 1);
-        std::io::stdin().read_line(&mut input).expect("Failed to read line");
-        let col: usize = input.trim().parse().expect("Please enter a number");
+impl BasicApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let mut game = GameNode::from_board(empty_board(), Player::Red);
+        let mut table = HashMap::new();
+        find_children(&mut game, 6, &mut table);
+        println!("Total unique nodes: {}", table.len());
+        println!("Total children: {}", game.count_children());
         
-        game.play_col(col);
-        game.flip_turn();
+        // Map from a unique key for each GameNode to the graph node index and its depth
+        let mut state_to_node: HashMap<BoardKey, (NodeIndex, usize)> = HashMap::new();
+        let mut rng = rand::rng();
+
+        let dig = StableDiGraph::new();
+        let mut graph = egui_graphs::Graph::from(&dig);
+
+        // Helper to count non-empty positions (turns played)
+        fn count_turns(board: &Vec<Vec<tree::Player>>) -> usize {
+            board.iter().flatten().filter(|&&p| p != tree::Player::Empty).count()
+        }
+
+        // Recursively add nodes and edges, reusing nodes for duplicate states, and store depth
+        fn add_to_graph(
+            node: &GameNode,
+            graph: &mut egui_graphs::Graph,
+            state_to_node: &mut HashMap<BoardKey, (NodeIndex, usize)>,
+            rng: &mut impl rand::Rng,
+            depth: usize,
+        ) -> NodeIndex {
+            let key = BoardKey(node.board.clone());
+            if let Some(&(idx, _)) = state_to_node.get(&key) {
+                return idx;
+            }
+            // Random initial position
+            let pos = Pos2::new(
+                rng.random_range(-100.0..100.0),
+                rng.random_range(-100.0..100.0),
+            );
+            // Store depth as node data
+            let graph_node = Node::<(), (), Directed, u32, DefaultNodeShape>::new(()).set_color(Color32::RED);
+            let idx = graph.add_node_with_location(graph_node, pos);
+            state_to_node.insert(key, (idx, depth));
+            for child in &node.children {
+                let child_depth = count_turns(&child.board);
+                let child_idx = add_to_graph(child, graph, state_to_node, rng, child_depth);
+                // Store depth as edge data (child_depth)
+                graph.add_edge(idx, child_idx, ());
+            }
+            idx
+        }
+
+        let root_depth = count_turns(&game.board);
+        add_to_graph(&game, &mut graph, &mut state_to_node, &mut rng, root_depth);
+
+        Self { g: graph }
     }
 }
 
+impl App for BasicApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // let mut widget = egui_graphs::DefaultGraphView::new(&mut self.g);
+            // ui.add(&mut widget);
+
+            type L = egui_graphs::LayoutForceDirected<egui_graphs::FruchtermanReingoldWithCenterGravity>;
+            type S = egui_graphs::FruchtermanReingoldWithCenterGravityState;
 
 
+            let mut widget = egui_graphs::GraphView::<_,_,_,_,_,_,S,L>::new(&mut self.g);
+            ui.add(&mut widget);
 
-
-fn find_children(game: &mut GameNode, depth: u32) {
-    if depth == 0 || game.result != Result::Ongoing {
-        return;
-    }
-
-    for x in 0..BOARD_SIZE.0 {
-        let child = game.from_turn(x);
-        game.children.push(child);
-        find_children(&mut game.children.last_mut().unwrap(), depth - 1);
-    }
-}
-
-
-
-
-
-
-
-fn main() {
-    let eb = empty_board();
-    let mut game = GameNode::from_board(eb);
-
-    find_children(&mut game, 1);
-
-
-    println!("Total children: {}", game.count_children());
-
-    println!("Game tree:");
-    for (i, c) in game.children.iter().enumerate() {
-        println!("Child: {}: {}", i, c.children.len());
+            // // Force‑Directed (FR) #with Center Gravity
+            // type L = egui_graphs::LayoutForceDirected<egui_graphs::FruchtermanReingoldWithCenterGravity>;
+            // type S = egui_graphs::FruchtermanReingoldWithCenterGravityState;
+            // let mut view = egui_graphs::GraphView::<_,_,_,_,_,_,S,L>::new(&mut self.g);
+            // ui.add(&mut view);
+        });
     }
 }

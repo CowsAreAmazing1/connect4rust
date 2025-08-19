@@ -4,4 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = "0.32.1"
+egui = "0.32.1"
+egui_graphs = "0.27.0"
+petgraph = "0.8.2"
+ptree = "0.5.2"
+rand = "0.9.2"
 term-painter = "0.4.0"
