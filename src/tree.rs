@@ -1,4 +1,5 @@
 
+use rand::seq::IteratorRandom;
 use serde::{Serialize, Deserialize};
 
 use std::{
@@ -6,6 +7,7 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     fmt::{Display, Formatter},
+    ops::{Index, IndexMut},
 };
 
 pub const BOARD_SIZE: (usize, usize) = (7, 6);
@@ -40,33 +42,52 @@ impl Display for Player {
 }
 
 
+type Grid = Vec<Vec<Player>>;
 
+#[derive(Clone, Debug, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Board(pub Grid);
 
-type Board = Vec<Vec<Player>>;
+impl Index<usize> for Board {
+    type Output = Vec<Player>;
+    fn index(&self, idx: usize) -> &Self::Output {
+        &self.0[idx]
+    }
+}
 
-#[derive(Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct BoardKey(pub Board);
+impl IndexMut<usize> for Board {
+    fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
+        &mut self.0[idx]
+    }
+}
 
-impl BoardKey {
+impl Board {
     // Returns the canonical (lexicographically smallest) of the board and its mirror
-    pub fn canonical(&self) -> Board {
-        let orig = &self.0;
-        let mirror: Board = orig.iter().rev().cloned().collect();
-        if orig < &mirror { orig.clone() } else { mirror }
+    pub fn canonical(&self) -> Self {
+        let original = &self.0;
+        let mirror = original.iter().rev().cloned().collect::<Grid>();
+        if original < &mirror { Board(original.clone()) } else { Board(mirror) }
+    }
+
+    pub fn play(&mut self, col: usize, player: Player) {
+        for y in 0..BOARD_SIZE.1 {
+            if self[col][y] == Player::Empty {
+                self[col][y] = player;
+                return;
+            }
+        }
+        panic!("Column {} is full", col);
     }
 }
 
-impl PartialEq for BoardKey {
+impl PartialEq for Board {
     fn eq(&self, other: &Self) -> bool {
-        self.canonical() == other.canonical()
+        self.canonical().0 == other.canonical().0
     }
 }
 
-impl Eq for BoardKey {}
-
-impl Hash for BoardKey {
+impl Hash for Board {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        for col in &self.canonical() {
+        for col in self.canonical().0.iter() {
             for cell in col {
                 cell.hash(state);
             }
@@ -74,7 +95,7 @@ impl Hash for BoardKey {
     }
 }
 
-impl Display for BoardKey {
+impl Display for Board {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         let board = self.canonical();
         for y in (0..BOARD_SIZE.1).rev() {
@@ -91,15 +112,15 @@ impl Display for BoardKey {
 }
 
 pub fn empty_board() -> Board {
-    let mut board = Vec::new();
+    let mut grid = Vec::new();
     for _x in 0..BOARD_SIZE.0 {
-        board.push(vec![Player::Empty; BOARD_SIZE.1]);
+        grid.push(vec![Player::Empty; BOARD_SIZE.1]);
     }
-    board
+    Board(grid)
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-enum Result {
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Result {
     Win(Player),
     Draw,
     Ongoing,
@@ -150,7 +171,7 @@ impl Result {
             }
         }
         // Check for draw (no empty spaces)
-        if board.iter().all(|col| col.iter().all(|&cell| cell != Player::Empty)) {
+        if board.0.iter().all(|col| col.iter().all(|&cell| cell != Player::Empty)) {
             Result::Draw
         } else {
             Result::Ongoing
@@ -160,11 +181,11 @@ impl Result {
 
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GameNode {
-    pub board: Vec<Vec<Player>>,
+    pub board: Board,
     turn: Player,
-    result: Result,
+    pub result: Result,
     pub children: Vec<Rc<GameNode>>,
 }
 
@@ -191,7 +212,7 @@ impl GameNode {
         panic!("Column {} is full", col);
     }
 
-    fn board_from_turn(&self, col: usize) -> Option<Vec<Vec<Player>>> {
+    fn board_from_turn(&self, col: usize) -> Option<Board> {
         let mut board = self.board.clone();
 
         for y in 0..BOARD_SIZE.1 {
@@ -253,7 +274,7 @@ fn play_game(game: &mut GameNode) {
 pub fn find_children(
     node: &mut GameNode,
     depth: u32,
-    table: &mut HashMap<BoardKey, Rc<GameNode>>,
+    table: &mut HashMap<Board, Rc<GameNode>>,
 ) -> Option<Rc<GameNode>> {
     let result = node.result;
 
@@ -261,13 +282,13 @@ pub fn find_children(
         return Some(Rc::new(node.clone()));
     }
 
-    for x in 0..BOARD_SIZE.0 {
+    let mut rng = rand::rng();
+    for x in (0..BOARD_SIZE.0).choose_multiple(&mut rng, 2) {
         // Try playing in column x
         let new_board_op = node.board_from_turn(x);
         if let Some(new_board) = new_board_op {
             // Get the key to this state in the table
-            let key = BoardKey(new_board.clone());
-            let canonical_key = BoardKey(key.canonical());
+            let canonical_key = new_board.canonical();
             if let Some(existing) = table.get(&canonical_key) {
                 // Already seen, just add reference
                 node.children.push(Rc::clone(existing));
@@ -285,7 +306,6 @@ pub fn find_children(
 
     Some(Rc::new(node.clone()))
 }
-
 
 
 

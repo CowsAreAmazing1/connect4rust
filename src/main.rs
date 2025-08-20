@@ -1,13 +1,12 @@
 mod tree;
+use tree::{GameNode, Player, Board, empty_board, find_children};
 
 use egui::{Color32, FontId, TextFormat};
 use egui_graphs::{SettingsNavigation};
-use rand::seq::IndexedRandom;
-use tree::{GameNode, Player, BoardKey, empty_board, find_children};
 use std::{collections::HashMap, time};
 use eframe::{egui::Pos2, run_native, App, NativeOptions};
 use epaint::text::{LayoutJob};
-use petgraph::prelude::*;
+use petgraph::{prelude::*};
 use bisetmap::BisetMap;
 
 use crate::tree::BOARD_SIZE;
@@ -26,17 +25,33 @@ pub struct BasicApp {
     g: egui_graphs::Graph,
     // game: GameNode,
     zoom_pan: bool,
-    state_node_map: BisetMap<BoardKey, NodeIndex>,
+    state_node_map: BisetMap<Board, NodeIndex>,
     hovered_node: NodeIndex,
 }
 
 impl BasicApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let mut game = GameNode::from_board(empty_board(), Player::Red);
+        let mut board = empty_board();
+        board.play(3, Player::Red);
+        board.play(2, Player::Yellow);
+        board.play(3, Player::Red);
+        board.play(3, Player::Yellow);
+        board.play(2, Player::Red);
+        board.play(4, Player::Yellow);
+        board.play(4, Player::Red);
+        board.play(2, Player::Yellow);
+        board.play(5, Player::Red);
+        board.play(5, Player::Yellow);
+
+        println!("Initial board:\n{}", board);
+        
+
+
+        let mut game = GameNode::from_board(board, Player::Red);
         let mut table = HashMap::new();
 
         let now = time::Instant::now();
-        find_children(&mut game, 12, &mut table);
+        find_children(&mut game, 8, &mut table);
         println!("Tree gen took {:?}", now.elapsed());
 
         println!("Total unique nodes: {}", table.len());
@@ -53,10 +68,10 @@ impl BasicApp {
         fn add_to_graph(
             node: &GameNode,
             graph: &mut egui_graphs::Graph,
-            state_node_map: &mut BisetMap<BoardKey, NodeIndex>,
+            state_node_map: &mut BisetMap<Board, NodeIndex>,
             rng: &mut impl rand::Rng,
         ) -> NodeIndex {
-            let key = BoardKey(node.board.clone());
+            let key = node.board.clone();
             if let Some(&idx) = state_node_map.get(&key).first() {
                 return idx;
             }
@@ -68,8 +83,7 @@ impl BasicApp {
             );
             let idx = graph.add_node_with_location((), pos);
             state_node_map.insert(key, idx);
-            let num = rng.random_range(1..=2);
-            for child in node.children.choose_multiple(rng, num) { // Randomly select 1-2 children to cut down the number of nodes a bit
+            for child in node.children.iter() { // Randomly select 1-2 children to cut down the number of nodes a bit
                 let child_idx = add_to_graph(child, graph, state_node_map, rng);
                 // Store depth as edge data (child_depth)
                 graph.add_edge(idx, child_idx, ());
@@ -79,9 +93,8 @@ impl BasicApp {
 
         add_to_graph(&game, &mut graph, &mut state_node_map, &mut rng);
 
-        let binding = state_node_map.get(&BoardKey(game.board.clone()));
+        let binding = state_node_map.get(&game.board.clone());
         let root_index = binding.first().unwrap();
-        
 
         Self {
             g: graph,
