@@ -1,10 +1,7 @@
 
-use rand::seq::IteratorRandom;
 use serde::{Serialize, Deserialize};
 
 use std::{
-    rc::Rc,
-    collections::HashMap,
     hash::{Hash, Hasher},
     fmt::{Display, Formatter},
     ops::{Index, IndexMut},
@@ -13,6 +10,7 @@ use std::{
 pub const BOARD_SIZE: (usize, usize) = (7, 6);
 
 
+// ===================== PLAYER ENUM =====================
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Player {
     Red,
@@ -42,9 +40,12 @@ impl Display for Player {
 }
 
 
+// ===================== GRID TYPE =====================
 type Grid = Vec<Vec<Player>>;
 
-#[derive(Clone, Debug, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+
+// ===================== BOARD WRAPPER =====================
+#[derive(Clone, Debug, Eq, PartialOrd, Ord)]
 pub struct Board(pub Grid);
 
 impl Index<usize> for Board {
@@ -61,6 +62,24 @@ impl IndexMut<usize> for Board {
 }
 
 impl Board {
+    pub fn empty() -> Self {
+        let mut grid = Vec::new();
+        for _x in 0..BOARD_SIZE.0 {
+            grid.push(vec![Player::Empty; BOARD_SIZE.1]);
+        }
+        Board(grid)
+    }
+
+    pub fn play(&mut self, col: usize, player: Player) -> Option<usize> {
+        for y in 0..BOARD_SIZE.1 {
+            if self[col][y] == Player::Empty {
+                self[col][y] = player;
+                return Some(y);
+            }
+        }
+        None
+    }
+
     // Returns the canonical (lexicographically smallest) of the board and its mirror
     pub fn canonical(&self) -> Self {
         let original = &self.0;
@@ -68,14 +87,13 @@ impl Board {
         if original < &mirror { Board(original.clone()) } else { Board(mirror) }
     }
 
-    pub fn play(&mut self, col: usize, player: Player) {
-        for y in 0..BOARD_SIZE.1 {
-            if self[col][y] == Player::Empty {
-                self[col][y] = player;
-                return;
-            }
+    pub fn from_turn(&self, col: usize, player: Player) -> Option<Self> {
+        let mut new_board = self.clone();
+        if let Some(_) = new_board.play(col, player) {
+            Some(new_board)
+        } else {
+            None
         }
-        panic!("Column {} is full", col);
     }
 }
 
@@ -111,14 +129,8 @@ impl Display for Board {
     }
 }
 
-pub fn empty_board() -> Board {
-    let mut grid = Vec::new();
-    for _x in 0..BOARD_SIZE.0 {
-        grid.push(vec![Player::Empty; BOARD_SIZE.1]);
-    }
-    Board(grid)
-}
 
+// ===================== RESULT ENUM =====================
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Result {
     Win(Player),
@@ -180,64 +192,60 @@ impl Result {
 }
 
 
+// ===================== STATEINDEX WRAPPER =====================
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StateIndex(usize);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct GameNode {
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameState {
     pub board: Board,
     turn: Player,
     pub result: Result,
-    pub children: Vec<Rc<GameNode>>,
+    pub children: Vec<StateIndex>,
+    index: Option<StateIndex>,
 }
 
-impl GameNode {
+impl GameState {
     pub fn from_board(board: Board, turn: Player) -> Self {
         let result = Result::from_board(&board);
 
-        GameNode {
+        GameState {
             board,
             turn,
             result,
             children: Vec::new(),
+            index: None,
         }
     }
 
-    fn play_col(&mut self, col: usize) {
-        for y in 0..BOARD_SIZE.1 {
-            if self.board[col][y] == Player::Empty {
-                self.board[col][y] = self.turn;
-                self.result = Result::from_board(&self.board);
-                return
-            }
+    fn from_turn(&self, col: usize) -> Option<Self> {
+        let new_turn = self.turn.flip();
+        let board = self.board.from_turn(col, new_turn);
+        if let Some(new_board) = board {
+            let result = Result::from_board(&new_board);
+            Some(GameState {
+                board: new_board,
+                turn: new_turn,
+                result,
+                children: Vec::new(),
+                index: None,
+            })
+        } else {
+            None
         }
-        panic!("Column {} is full", col);
     }
 
-    fn board_from_turn(&self, col: usize) -> Option<Board> {
-        let mut board = self.board.clone();
-
-        for y in 0..BOARD_SIZE.1 {
-            if board[col][y] == Player::Empty {
-                board[col][y] = self.turn;
-                return Some(board)
-            }
-        }
-        None
-    }
-
-    fn flip_turn(&mut self) {
+    fn _flip_turn(&mut self) {
         self.turn = match self.turn {
             Player::Red => Player::Yellow,
             Player::Yellow => Player::Red,
             _ => panic!("This board's turn is Empty\n{}", self),
         }
     }
-
-    pub fn count_children(&self) -> usize {
-        self.children.iter().map(|child| child.count_children()).sum::<usize>() + self.children.len()
-    }
 }
 
-impl Display for GameNode {
+impl Display for GameState {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         for y in (0..BOARD_SIZE.1).rev() {
             for x in 0..BOARD_SIZE.0 {
@@ -256,70 +264,171 @@ impl Display for GameNode {
 
 
 
-#[allow(dead_code)]
-fn play_game(game: &mut GameNode) {
-    while game.result == Result::Ongoing {
-        println!("{}", game);
-        let mut input = String::new();
-        println!("Enter column to play (0-{}): ", BOARD_SIZE.0 - 1);
-        std::io::stdin().read_line(&mut input).expect("Failed to read line");
-        let col: usize = input.trim().parse().expect("Please enter a number");
+// ===================== TREE STRUCT =====================
+pub struct Tree {
+    pub root: StateIndex,
+    pub nodes: Vec<GameState>,
+}
+
+impl Tree {
+    pub fn from_root(root: &GameState) -> Self {
+        let mut nodes = Vec::new();
+        nodes.push(root.clone());
+
+        Tree {
+            root: StateIndex(0),
+            nodes,
+        }
+    }
+
+    pub fn num_children(&self, index: &StateIndex) -> usize {
+        self.nodes[index.0].children.len()
+    }
+
+    pub fn iter_children(&self, index: &StateIndex) -> std::slice::Iter<'_, StateIndex> {
+        self.nodes[index.0].children.iter()
+    }
+
+    pub fn get_board(&self, index: &StateIndex) -> &Board {
+        &self[index].board
+    }
+
+    // fn dive(&self) -> Option<(&Tree, &GameState)> {
+    //     if self.nodes.is_empty() {
+    //         return None;
+    //     }
+    //     let root_node = &self.nodes[self.root.0];
+    //     Some((self, root_node))
+    // }
+
+    pub fn count_children(&self) -> usize {
+        self.count_sub_children(&StateIndex(0))
+    }
+
+    fn count_sub_children(&self, si: &StateIndex) -> usize {
+        self.iter_children(si).map(|child| self.num_children(child) + self.count_sub_children(child)).sum::<usize>()
+    }
+
+    fn next_index(&self) -> StateIndex {
+        StateIndex(self.nodes.len())
+    }
+
+    pub fn explore(&mut self, depth: u32) {
+        println!("===============\nNodes before anything");
+        self.nodes.iter().for_each(|n| println!("{}", n));
+        println!("==============");
+
+        let root_index = self.root.clone();
+        let mut state = self[&root_index].clone();
+
+        println!("exploring now");
+        self.find_children(&mut state, depth);
+
+        println!("state before setting: {}", &state);
+        println!("num kids before: {}", &state.children.len());
+        println!("printing all kdis before:");
+        state.children.iter().for_each(|c| println!("{}", self[c]));
+        println!();
+
+        println!();
+        println!("root index: {:?}", &root_index);
+        println!("in 0 before: {}", self[&root_index]);
+        self[&root_index] = state;
+    }
+
+    fn find_children(
+        &mut self,
+        state: &mut GameState,
+        depth: u32,
+    ) {
+        let result = state.result;
+
+        if depth == 0 || result != Result::Ongoing {
+            return;
+        }
+
+        println!("first node num childs: {}", self.nodes[0].children.len());
+
+        // let mut rng = rand::rng();
+
+        for x in 0..BOARD_SIZE.0 { // (0..BOARD_SIZE.0).choose_multiple(&mut rng, 2) {
+            if let Some(mut new_state) = state.from_turn(x) {
+                let new_index = self.next_index();
+                new_state.index = Some(new_index.clone());
+
+                state.children.push(new_index);
+                self.find_children(&mut new_state, depth - 1);
+                self.nodes.push(new_state.clone());
+            }
+        }
+    }
+}
+
+impl Index<usize> for Tree {
+    type Output = GameState;
+    fn index(&self, idx: usize) -> &Self::Output {
+        &self.nodes[idx]
+    }
+}
+
+impl Index<StateIndex> for Tree {
+    type Output = GameState;
+    fn index(&self, idx: StateIndex) -> &Self::Output {
+        &self.nodes[idx.0]
+    }
+}
+impl Index<&StateIndex> for Tree {
+    type Output = GameState;
+    fn index(&self, idx: &StateIndex) -> &Self::Output {
+        &self.nodes[idx.0]
+    }
+}
+
+impl IndexMut<StateIndex> for Tree {
+    fn index_mut(&mut self, idx: StateIndex) -> &mut Self::Output {
+        &mut self.nodes[idx.0]
+    }
+}
+impl IndexMut<&StateIndex> for Tree {
+    fn index_mut(&mut self, idx: &StateIndex) -> &mut Self::Output {
+        &mut self.nodes[idx.0]
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+// #[allow(dead_code)]
+// fn play_game(game: &mut GameState) {
+//     while game.result == Result::Ongoing {
+//         println!("{}", game);
+//         let mut input = String::new();
+//         println!("Enter column to play (0-{}): ", BOARD_SIZE.0 - 1);
+//         std::io::stdin().read_line(&mut input).expect("Failed to read line");
+//         let col: usize = input.trim().parse().expect("Please enter a number");
         
-        game.play_col(col);
-        game.flip_turn();
-    }
-}
+//         game.play_col(col);
+//         game.flip_turn();
+//     }
+// }
 
-
-pub fn find_children(
-    node: &mut GameNode,
-    depth: u32,
-    table: &mut HashMap<Board, Rc<GameNode>>,
-) -> Option<Rc<GameNode>> {
-    let result = node.result;
-
-    if depth == 0 || result != Result::Ongoing {
-        return Some(Rc::new(node.clone()));
-    }
-
-    let mut rng = rand::rng();
-    for x in (0..BOARD_SIZE.0).choose_multiple(&mut rng, 2) {
-        // Try playing in column x
-        let new_board_op = node.board_from_turn(x);
-        if let Some(new_board) = new_board_op {
-            // Get the key to this state in the table
-            let canonical_key = new_board.canonical();
-            if let Some(existing) = table.get(&canonical_key) {
-                // Already seen, just add reference
-                node.children.push(Rc::clone(existing));
-                continue;
-            }
-            // Otherwise create the new game state node
-            let mut new_node = GameNode::from_board(new_board, node.turn.flip());
-            let searched_node_op = find_children(&mut new_node, depth-1, table);
-            if let Some(searched_node) = searched_node_op {
-                table.insert(canonical_key, searched_node.clone());
-                node.children.push(searched_node);
-            }
-        }
-    }
-
-    Some(Rc::new(node.clone()))
-}
-
-
-
-
-#[allow(dead_code)]
-fn display_full_tree(start_node: &GameNode) {
-    for child in start_node.children.iter() {
-        println!("{}", child);
-        if !child.children.is_empty() {
-            println!("goes to:\n");
-            display_full_tree(child);
-        }
-    }
-}
+// #[allow(dead_code)]
+// fn display_full_tree(start_node: &GameNode) {
+//     for child in start_node.children.iter() {
+//         println!("{}", child);
+//         if !child.children.is_empty() {
+//             println!("goes to:\n");
+//             display_full_tree(child);
+//         }
+//     }
+// }
 
 
 /*
