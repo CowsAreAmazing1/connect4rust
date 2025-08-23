@@ -5,6 +5,7 @@ use std::{
     hash::{Hash, Hasher},
     fmt::{Display, Formatter},
     ops::{Index, IndexMut},
+    collections::HashMap,
 };
 
 pub const BOARD_SIZE: (usize, usize) = (7, 6);
@@ -117,6 +118,7 @@ impl Display for Board {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         let board = self.canonical();
         for y in (0..BOARD_SIZE.1).rev() {
+            write!(f, "|")?;
             for x in 0..BOARD_SIZE.0 {
                 write!(f, "{}", board[x][y])?;
             }
@@ -193,8 +195,14 @@ impl Result {
 
 
 // ===================== STATEINDEX WRAPPER =====================
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StateIndex(usize);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct StateIndex(pub usize);
+
+impl Display for StateIndex {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        writeln!(f, "{}", self.0)
+    }
+}
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +211,7 @@ pub struct GameState {
     turn: Player,
     pub result: Result,
     pub children: Vec<StateIndex>,
-    index: Option<StateIndex>,
+    pub index: Option<StateIndex>,
 }
 
 impl GameState {
@@ -220,39 +228,33 @@ impl GameState {
     }
 
     fn from_turn(&self, col: usize) -> Option<Self> {
-        let new_turn = self.turn.flip();
-        let board = self.board.from_turn(col, new_turn);
+        let board = self.board.from_turn(col, self.turn);
+        // If that move is valid ...
         if let Some(new_board) = board {
-            let result = Result::from_board(&new_board);
-            Some(GameState {
+            let new_result = Result::from_board(&new_board);
+            let new_turn = self.turn.flip();
+
+            let state = GameState {
                 board: new_board,
                 turn: new_turn,
-                result,
+                result: new_result,
                 children: Vec::new(),
                 index: None,
-            })
+            };
+            Some(state)
         } else {
             None
-        }
-    }
-
-    fn _flip_turn(&mut self) {
-        self.turn = match self.turn {
-            Player::Red => Player::Yellow,
-            Player::Yellow => Player::Red,
-            _ => panic!("This board's turn is Empty\n{}", self),
         }
     }
 }
 
 impl Display for GameState {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        for y in (0..BOARD_SIZE.1).rev() {
-            for x in 0..BOARD_SIZE.0 {
-                write!(f, "{}", self.board[x][y])?;
-            }
-            writeln!(f)?;
+        match &self.index {
+            None                   => write!(f, "State: ?")?,
+            Some(idx) => write!(f, "State: {}", idx)?,
         }
+        writeln!(f, "{}", self.board)?;
         write!(f, "Goes to {}, ", self.children.len())?;
         match self.result {
             Result::Ongoing        => write!(f, "its {}'s turn", self.turn),
@@ -266,18 +268,20 @@ impl Display for GameState {
 
 // ===================== TREE STRUCT =====================
 pub struct Tree {
-    pub root: StateIndex,
+    pub root_index: StateIndex,
     pub nodes: Vec<GameState>,
 }
 
 impl Tree {
     pub fn from_root(root: &GameState) -> Self {
-        let mut nodes = Vec::new();
-        nodes.push(root.clone());
+        let root_index = StateIndex(0);
+
+        let mut root = root.clone();
+        root.index = Some(root_index.clone());
 
         Tree {
-            root: StateIndex(0),
-            nodes,
+            root_index,
+            nodes: vec![root],
         }
     }
 
@@ -313,52 +317,40 @@ impl Tree {
         StateIndex(self.nodes.len())
     }
 
-    pub fn explore(&mut self, depth: u32) {
-        println!("===============\nNodes before anything");
-        self.nodes.iter().for_each(|n| println!("{}", n));
-        println!("==============");
-
-        let root_index = self.root.clone();
-        let mut state = self[&root_index].clone();
-
-        println!("exploring now");
-        self.find_children(&mut state, depth);
-
-        println!("state before setting: {}", &state);
-        println!("num kids before: {}", &state.children.len());
-        println!("printing all kdis before:");
-        state.children.iter().for_each(|c| println!("{}", self[c]));
-        println!();
-
-        println!();
-        println!("root index: {:?}", &root_index);
-        println!("in 0 before: {}", self[&root_index]);
-        self[&root_index] = state;
+    pub fn explore(&mut self, depth: u32) -> HashMap<Board, StateIndex> {
+        let mut map = HashMap::new();
+        self.find_children(self.root_index.clone(), depth, &mut map);
+        map
     }
 
     fn find_children(
         &mut self,
-        state: &mut GameState,
+        state_index: StateIndex,
         depth: u32,
+        map: &mut HashMap<Board, StateIndex>,
     ) {
-        let result = state.result;
+        let result = self[&state_index].result;
 
         if depth == 0 || result != Result::Ongoing {
             return;
         }
 
-        println!("first node num childs: {}", self.nodes[0].children.len());
-
         // let mut rng = rand::rng();
 
         for x in 0..BOARD_SIZE.0 { // (0..BOARD_SIZE.0).choose_multiple(&mut rng, 2) {
-            if let Some(mut new_state) = state.from_turn(x) {
+            if let Some(mut new_state) = self[&state_index].from_turn(x) {
+                if let Some(&idx) = map.get(&new_state.board) {
+                    new_state.index = Some(idx);
+                    self[&state_index].children.push(idx);
+                    return
+                }
                 let new_index = self.next_index();
                 new_state.index = Some(new_index.clone());
+                self[&state_index].children.push(new_index.clone());
+                map.insert(new_state.board.canonical(), new_index);
+                self.nodes.push(new_state);
 
-                state.children.push(new_index);
-                self.find_children(&mut new_state, depth - 1);
-                self.nodes.push(new_state.clone());
+                self.find_children(new_index, depth - 1, map);
             }
         }
     }

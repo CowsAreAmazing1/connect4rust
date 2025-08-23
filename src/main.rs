@@ -1,5 +1,5 @@
 mod tree;
-use tree::{Player, Board, GameState, StateIndex, Tree};
+use tree::{Player, Board, Result, GameState, StateIndex, Tree};
 
 use egui::{Color32, FontId, TextFormat};
 use egui_graphs::{SettingsNavigation};
@@ -8,6 +8,7 @@ use eframe::{egui::Pos2, run_native, App, NativeOptions};
 use epaint::text::{LayoutJob};
 use petgraph::{prelude::*};
 use bisetmap::BisetMap;
+use rand::prelude::*;
 
 use crate::tree::BOARD_SIZE;
 
@@ -31,51 +32,54 @@ pub struct BasicApp {
 
 impl BasicApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let board = Board::empty();
-        // board.play(3, Player::Red);
-        // board.play(2, Player::Yellow);
-        // board.play(3, Player::Red);
-        // board.play(3, Player::Yellow);
-        // board.play(2, Player::Red);
-        // board.play(4, Player::Yellow);
-        // board.play(4, Player::Red);
-        // board.play(2, Player::Yellow);
-        // board.play(5, Player::Red);
-        // board.play(5, Player::Yellow);
+        let mut board = Board::empty();
 
-        
+        board.play(3, Player::Red);
+        board.play(2, Player::Yellow);
+        board.play(3, Player::Red);
+        board.play(3, Player::Yellow);
+        board.play(2, Player::Red);
+        board.play(4, Player::Yellow);
+        board.play(4, Player::Red);
+        board.play(2, Player::Yellow);
+        board.play(5, Player::Red);
+        board.play(5, Player::Yellow);
         
         
         let game = GameState::from_board(board.canonical(), Player::Red);
         let mut tree = Tree::from_root(&game);
 
+
         
         let now = time::Instant::now();
-        tree.explore(1);
+        tree.explore(11);
+
         println!("Tree gen took {:?}", now.elapsed());
         
-        println!("Initial board:\n{}", &game);
-        println!("===================================================");
-
         println!("Total unique nodes: {}", tree.nodes.len());
         println!("Total children: {}", tree.count_children());
 
-        // println!("{}", tree.nodes.iter().filter(|n| !n.children.is_empty()).count());
-        println!("Root: {}", tree[&tree.root]);
-        println!("nodes: {}", tree.nodes.len());
+        println!("{}", &tree[&tree.root_index]);
 
-        // println!("all kids: {:?}", tree.nodes.iter().map(|n| n.children.len()).collect::<Vec<_>>());
-        println!("roots kids: {:?}", tree.iter_children(&tree.root));
-        println!("roots first: {}", tree[tree.iter_children(&tree.root).next().unwrap()]);
+
+        let mut win_nodes = vec![false; tree.nodes.len()];
+        prune_to_wins(&tree, &mut win_nodes, &tree.root_index);
+
+
+        println!("Pruned to {} nodes", &win_nodes.iter().filter(|&n| *n).count());
+        tree.prune_to_win_nodes(&win_nodes);
+        println!("Pruning took {:?}", now.elapsed());
+        
         
         let mut state_node_map = BisetMap::new();
         let mut rng = rand::rng();
+
 
         let dig = StableDiGraph::new();
         let mut graph = egui_graphs::Graph::from(&dig);
 
     
-        // Recursively add nodes and edges, reusing nodes for duplicate states, and store depth
+        // Recursively add nodes and edges, reusing nodes for duplicate states
         fn add_to_graph(
             tree: &Tree,
             state_index: &StateIndex,
@@ -83,9 +87,8 @@ impl BasicApp {
             state_node_map: &mut BisetMap<StateIndex, NodeIndex>,
             rng: &mut impl rand::Rng,
         ) -> NodeIndex {
-            println!("called add_to_graph");
             if let Some(&idx) = state_node_map.get(state_index).first() {
-                println!("Found existing node for state: {}", tree[state_index]);
+                // println!("Found existing node for state: {}", tree[state_index]);
                 return idx;
             }
 
@@ -96,22 +99,23 @@ impl BasicApp {
             );
             let idx = graph.add_node_with_location((), pos);
             state_node_map.insert(state_index.clone(), idx);
-            for child in tree.iter_children(state_index) {
-
+            for child in tree.iter_children(state_index).choose_multiple(rng, rand::random_range(1..=3)) {
                 let child_idx = add_to_graph(tree, child, graph, state_node_map, rng);
                 graph.add_edge(idx, child_idx, ());
             }
             idx
         }
 
-        add_to_graph(&tree, &tree.root, &mut graph, &mut state_node_map, &mut rng);
+        let now = time::Instant::now();
+        add_to_graph(&tree, &tree.root_index, &mut graph, &mut state_node_map, &mut rng);
+        println!("Graph generating took {:?}", now.elapsed());
 
-        let root_node = state_node_map.get(&tree.root).first().unwrap().to_owned();
+
+        let root_node = state_node_map.get(&tree.root_index).first().unwrap().to_owned();
 
         Self {
             tree,
             graph,
-            // game,
             zoom_pan: false,
             state_node_map,
             hovered_node: root_node,
@@ -198,4 +202,66 @@ fn board_to_layout_job(board: &Board) -> LayoutJob {
     }
     
     job
+}
+
+
+
+
+
+
+
+
+
+fn prune_to_wins(tree: &Tree, nodes: &mut Vec<bool>, state: &StateIndex) -> bool {
+    let mut this_one = match tree[state].result {
+        Result::Win(_) => true,
+        _              => false,
+    };
+
+    for child in tree.iter_children(state) {
+        if prune_to_wins(tree, nodes, child) {
+            this_one = true;
+        }
+    }
+    
+    nodes[state.0] = this_one;
+    this_one
+}
+
+
+impl Tree {
+    /// Prune the tree to only nodes marked as true in `keep`, remapping indices and children.
+    pub fn prune_to_win_nodes(&mut self, keep: &[bool]) {
+        // Build mapping from old index to new index
+        let nodes_len = self.nodes.len();
+        let mut new_nodes = Vec::with_capacity(nodes_len);
+        let mut old_to_new = vec![None; nodes_len];
+        for (old_idx, node) in self.nodes.drain(..).enumerate() {
+            if keep[old_idx] {
+                let new_idx = new_nodes.len();
+                old_to_new[old_idx] = Some(new_idx);
+                new_nodes.push(node); // moves, not clones
+            }
+        }
+        // Update children to only include kept nodes, and remap indices
+        for (new_idx, node) in new_nodes.iter_mut().enumerate() {
+            let mut new_children = Vec::new();
+            for child in &node.children {
+                if let Some(&Some(new_child_idx)) = old_to_new.get(child.0) {
+                    new_children.push(crate::tree::StateIndex(new_child_idx));
+                }
+            }
+            node.children = new_children;
+            // Also update node.index
+            node.index = Some(crate::tree::StateIndex(new_idx));
+        }
+        // Update root_index
+        if let Some(new_root) = old_to_new[self.root_index.0] {
+            self.root_index = crate::tree::StateIndex(new_root);
+        } else {
+            // If root is not kept, set to 0 (empty tree)
+            self.root_index = crate::tree::StateIndex(0);
+        }
+        self.nodes = new_nodes;
+    }
 }
