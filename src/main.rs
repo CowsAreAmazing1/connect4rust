@@ -32,30 +32,36 @@ pub struct BasicApp {
 
 impl BasicApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let mut board = Board::empty();
+        let board = Board::empty();
 
-        board.play(3, Player::Red);
-        board.play(2, Player::Yellow);
-        board.play(3, Player::Red);
-        board.play(3, Player::Yellow);
-        board.play(2, Player::Red);
-        board.play(4, Player::Yellow);
-        board.play(4, Player::Red);
-        board.play(2, Player::Yellow);
-        board.play(5, Player::Red);
-        board.play(5, Player::Yellow);
+        let mut target_board = Board::empty();
+        target_board.play(3, Player::Red);
+        target_board.play(3, Player::Yellow);
+        target_board.play(2, Player::Red);
+        target_board.play(3, Player::Yellow);
+        target_board.play(2, Player::Red);
+        target_board.play(4, Player::Yellow);
+        // target_board.play(4, Player::Red);
+        // target_board.play(2, Player::Yellow);
+        // target_board.play(5, Player::Red);
+        // target_board.play(5, Player::Yellow);
+        // target_board.play(1, Player::Red);
+        // target_board.play(0, Player::Yellow);
+
+
+
+
+        println!("The target board:\n{}", target_board.canonical());
         
         
         let game = GameState::from_board(board.canonical(), Player::Red);
         let mut tree = Tree::from_root(&game);
 
-
         
         let now = time::Instant::now();
-        tree.explore(11);
+        tree.explore(8);
 
         println!("Tree gen took {:?}", now.elapsed());
-        
         println!("Total unique nodes: {}", tree.nodes.len());
         println!("Total children: {}", tree.count_children());
 
@@ -63,12 +69,13 @@ impl BasicApp {
 
 
         let mut win_nodes = vec![false; tree.nodes.len()];
-        prune_to_wins(&tree, &mut win_nodes, &tree.root_index);
+        // prune_to_wins(&tree, &mut win_nodes, &tree.root_index);
+        prune_to_target(&tree, &mut win_nodes, &tree.root_index, &target_board);
 
 
-        println!("Pruned to {} nodes", &win_nodes.iter().filter(|&n| *n).count());
-        tree.prune_to_win_nodes(&win_nodes);
+        // tree.mask_nodes(&win_nodes);
         println!("Pruning took {:?}", now.elapsed());
+        println!("Pruned to {} nodes", &win_nodes.iter().filter(|&n| *n).count());
         
         
         let mut state_node_map = BisetMap::new();
@@ -85,11 +92,18 @@ impl BasicApp {
             state_index: &StateIndex,
             graph: &mut egui_graphs::Graph,
             state_node_map: &mut BisetMap<StateIndex, NodeIndex>,
+            mask: &Vec<bool>,
             rng: &mut impl rand::Rng,
-        ) -> NodeIndex {
+        ) -> Option<NodeIndex> {
+            if let Some(&b) = mask.get(state_index.0) {
+                if !b {
+                    return None;
+                }
+            }
+
             if let Some(&idx) = state_node_map.get(state_index).first() {
                 // println!("Found existing node for state: {}", tree[state_index]);
-                return idx;
+                return Some(idx);
             }
 
             // Random initial position
@@ -99,16 +113,22 @@ impl BasicApp {
             );
             let idx = graph.add_node_with_location((), pos);
             state_node_map.insert(state_index.clone(), idx);
-            for child in tree.iter_children(state_index).choose_multiple(rng, rand::random_range(1..=3)) {
-                let child_idx = add_to_graph(tree, child, graph, state_node_map, rng);
-                graph.add_edge(idx, child_idx, ());
+            for child in tree.iter_children(state_index) { // .choose_multiple(rng, rand::random_range(2..=3)) {
+                let child_idx = add_to_graph(tree, child, graph, state_node_map, mask, rng);
+                if let Some(child_idx) = child_idx {
+                    graph.add_edge(idx, child_idx, ());
+                }
             }
-            idx
+            Some(idx)
         }
 
         let now = time::Instant::now();
-        add_to_graph(&tree, &tree.root_index, &mut graph, &mut state_node_map, &mut rng);
+        add_to_graph(&tree, &tree.root_index, &mut graph, &mut state_node_map, &win_nodes, &mut rng);
         println!("Graph generating took {:?}", now.elapsed());
+
+
+        println!();
+        println!("{:?}", state_node_map.flat_collect());
 
 
         let root_node = state_node_map.get(&tree.root_index).first().unwrap().to_owned();
@@ -172,6 +192,17 @@ impl App for BasicApp {
             } else {
                 ui.label("Hovered Node Key: None");
             }
+
+
+            ui.horizontal(|ui| {
+                // if ui.small_button("0").clicked() {self.};
+                // if ui.small_button("1").clicked() {self.};
+                // if ui.small_button("2").clicked() {self.};
+                // if ui.small_button("3").clicked() {self.};
+                // if ui.small_button("4").clicked() {self.};
+                // if ui.small_button("5").clicked() {self.};
+                // if ui.small_button("6").clicked() {self.};
+            })
         });
     }
 }
@@ -228,10 +259,41 @@ fn prune_to_wins(tree: &Tree, nodes: &mut Vec<bool>, state: &StateIndex) -> bool
     this_one
 }
 
+fn prune_to_target(tree: &Tree, nodes: &mut Vec<bool>, state: &StateIndex, target: &Board) -> bool {
+    let board = &tree[state].board;
+
+    // Fast impossible-branch check
+    for (col_idx, (col, target_col)) in board.0.iter().zip(target.0.iter()).enumerate() {
+        // Get non-empty pieces in both columns
+        let col_pieces: Vec<_> = col.iter().filter(|&&p| p != Player::Empty).collect();
+        let target_pieces: Vec<_> = target_col.iter().filter(|&&p| p != Player::Empty).collect();
+
+        if col_pieces.len() > target_pieces.len() {
+            // More pieces than target: impossible
+            nodes[state.0] = false;
+            return false;
+        }
+        if col_pieces.len() == target_pieces.len() && col_pieces != target_pieces {
+            // Same number but different sequence: impossible
+            nodes[state.0] = false;
+            return false;
+        }
+    }
+
+    let mut this_one = board.canonical() == target.canonical();
+    for child in tree.iter_children(state) {
+        if prune_to_target(tree, nodes, child, target) {
+            this_one = true;
+        }
+    }
+    nodes[state.0] = this_one;
+    this_one
+}
+
 
 impl Tree {
     /// Prune the tree to only nodes marked as true in `keep`, remapping indices and children.
-    pub fn prune_to_win_nodes(&mut self, keep: &[bool]) {
+    pub fn mask_nodes(&mut self, keep: &[bool]) {
         // Build mapping from old index to new index
         let nodes_len = self.nodes.len();
         let mut new_nodes = Vec::with_capacity(nodes_len);

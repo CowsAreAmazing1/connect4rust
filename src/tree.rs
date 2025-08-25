@@ -1,5 +1,4 @@
 
-use serde::{Serialize, Deserialize};
 
 use std::{
     hash::{Hash, Hasher},
@@ -12,7 +11,7 @@ pub const BOARD_SIZE: (usize, usize) = (7, 6);
 
 
 // ===================== PLAYER ENUM =====================
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Player {
     Red,
     Yellow,
@@ -133,7 +132,7 @@ impl Display for Board {
 
 
 // ===================== RESULT ENUM =====================
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Result {
     Win(Player),
     Draw,
@@ -329,28 +328,24 @@ impl Tree {
         depth: u32,
         map: &mut HashMap<Board, StateIndex>,
     ) {
-        let result = self[&state_index].result;
-
-        if depth == 0 || result != Result::Ongoing {
+        if depth == 0 || self[&state_index].result != Result::Ongoing {
             return;
         }
 
-        // let mut rng = rand::rng();
-
-        for x in 0..BOARD_SIZE.0 { // (0..BOARD_SIZE.0).choose_multiple(&mut rng, 2) {
+        for x in 0..BOARD_SIZE.0 {
             if let Some(mut new_state) = self[&state_index].from_turn(x) {
                 if let Some(&idx) = map.get(&new_state.board) {
                     new_state.index = Some(idx);
                     self[&state_index].children.push(idx);
-                    return
+                    // return;
+                } else {
+                    let new_index = self.next_index();
+                    new_state.index = Some(new_index.clone());
+                    self[&state_index].children.push(new_index.clone());
+                    map.insert(new_state.board.canonical(), new_index);
+                    self.nodes.push(new_state);
+                    self.find_children(new_index, depth - 1, map);
                 }
-                let new_index = self.next_index();
-                new_state.index = Some(new_index.clone());
-                self[&state_index].children.push(new_index.clone());
-                map.insert(new_state.board.canonical(), new_index);
-                self.nodes.push(new_state);
-
-                self.find_children(new_index, depth - 1, map);
             }
         }
     }
