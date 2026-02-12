@@ -199,7 +199,7 @@ pub struct StateIndex(pub usize);
 
 impl Display for StateIndex {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        writeln!(f, "{}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -209,7 +209,7 @@ pub struct GameState {
     pub board: Board,
     turn: Player,
     pub result: Result,
-    pub children: Vec<StateIndex>,
+    pub children: Vec<Option<StateIndex>>,
     pub index: Option<StateIndex>,
 }
 
@@ -245,6 +245,26 @@ impl GameState {
             None
         }
     }
+
+    pub fn ok_children(&self) -> impl Iterator<Item = &StateIndex> {
+        self.children.iter().filter_map(|c| c.as_ref())
+    }
+
+    /// Counts the number of pieces for each player on the board: (red, yellow)
+    pub fn count_pieces(&self) -> (usize, usize) {
+        let mut red_count = 0;
+        let mut yellow_count = 0;
+        for col in &self.board.0 {
+            for &cell in col {
+                match cell {
+                    Player::Red    => red_count += 1,
+                    Player::Yellow => yellow_count += 1,
+                    _              => {},
+                }
+            }
+        }
+        (red_count, yellow_count)
+    }
 }
 
 impl Display for GameState {
@@ -269,6 +289,7 @@ impl Display for GameState {
 pub struct Tree {
     pub root_index: StateIndex,
     pub nodes: Vec<GameState>,
+    map: HashMap<Board, StateIndex>,
 }
 
 impl Tree {
@@ -278,9 +299,12 @@ impl Tree {
         let mut root = root.clone();
         root.index = Some(root_index.clone());
 
+        let map = HashMap::new();
+
         Tree {
             root_index,
             nodes: vec![root],
+            map,
         }
     }
 
@@ -288,9 +312,16 @@ impl Tree {
         self.nodes[index.0].children.len()
     }
 
-    pub fn iter_children(&self, index: &StateIndex) -> std::slice::Iter<'_, StateIndex> {
-        self.nodes[index.0].children.iter()
+    pub fn iter_children(&self, index: &StateIndex) -> impl Iterator<Item = &Option<StateIndex>> {
+        self[index].children.iter()
     }
+
+    pub fn iter_ok_children(&self, index: &StateIndex) -> impl Iterator<Item = &StateIndex> {
+            self[index]
+                .children
+                .iter()
+                .filter_map(|c| c.as_ref())
+        }
 
     pub fn get_board(&self, index: &StateIndex) -> &Board {
         &self[index].board
@@ -309,24 +340,33 @@ impl Tree {
     }
 
     fn count_sub_children(&self, si: &StateIndex) -> usize {
-        self.iter_children(si).map(|child| self.num_children(child) + self.count_sub_children(child)).sum::<usize>()
+        self.iter_children(si).map(|child| {
+            if let Some(child) = child {
+                1 + self.count_sub_children(child)
+            } else {
+                0
+            }
+        }).sum::<usize>()
     }
 
     fn next_index(&self) -> StateIndex {
         StateIndex(self.nodes.len())
     }
 
-    pub fn explore(&mut self, depth: u32) -> HashMap<Board, StateIndex> {
-        let mut map = HashMap::new();
-        self.find_children(self.root_index.clone(), depth, &mut map);
-        map
+    pub fn explore(&mut self, depth: u32) {
+        self.find_children(self.root_index.clone(), depth);
+    }
+
+    pub fn explore_further(&mut self, depth: u32, head: &StateIndex) {
+        let n = self.nodes.len();
+        self.find_children(*head, depth);
+        println!("Added {} nodes", self.nodes.len() - n);
     }
 
     fn find_children(
         &mut self,
         state_index: StateIndex,
         depth: u32,
-        map: &mut HashMap<Board, StateIndex>,
     ) {
         if depth == 0 || self[&state_index].result != Result::Ongoing {
             return;
@@ -334,18 +374,20 @@ impl Tree {
 
         for x in 0..BOARD_SIZE.0 {
             if let Some(mut new_state) = self[&state_index].from_turn(x) {
-                if let Some(&idx) = map.get(&new_state.board) {
+                if let Some(&idx) = self.map.get(&new_state.board) {
                     new_state.index = Some(idx);
-                    self[&state_index].children.push(idx);
+                    self[&state_index].children.push(Some(idx));
                     // return;
                 } else {
                     let new_index = self.next_index();
                     new_state.index = Some(new_index.clone());
-                    self[&state_index].children.push(new_index.clone());
-                    map.insert(new_state.board.canonical(), new_index);
+                    self[&state_index].children.push(Some(new_index.clone()));
+                    self.map.insert(new_state.board.canonical(), new_index);
                     self.nodes.push(new_state);
-                    self.find_children(new_index, depth - 1, map);
+                    self.find_children(new_index, depth - 1);
                 }
+            } else { // Invalid move, but still need to add a placeholder
+                self[&state_index].children.push(None);
             }
         }
     }
